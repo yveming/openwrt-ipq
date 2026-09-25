@@ -275,7 +275,7 @@
  	/* enslave is successful */
  	bond_queue_slave_event(new_slave);
  	return 0;
-@@ -2418,6 +2461,15 @@
+@@ -2418,7 +2461,16 @@
  		}
  	}
  
@@ -291,6 +291,7 @@
  	return res;
  }
  
+ /* Try to release the slave device <slave> from the bond device <master>
 @@ -2439,6 +2491,7 @@
  	struct bonding *bond = netdev_priv(bond_dev);
  	struct slave *slave, *oldcurrent;
@@ -337,7 +338,7 @@
  			slave_info(bond->dev, slave->dev, "link status definitely up, %u Mbps %s duplex\n",
  				   slave->speed == SPEED_UNKNOWN ? 0 : slave->speed,
  				   slave->duplex ? "full" : "half");
-@@ -2882,6 +2952,16 @@
+@@ -2882,7 +2952,17 @@
  		unblock_netpoll_tx();
  	}
  
@@ -354,6 +355,7 @@
  	bond_set_carrier(bond);
  }
  
+ /* bond_mii_monitor
 @@ -4131,9 +4211,220 @@
  		return 0;
  
@@ -640,7 +642,7 @@
  #ifdef CONFIG_NET_POLL_CONTROLLER
  extern atomic_t netpoll_block_tx;
  
-@@ -676,6 +678,7 @@ struct bond_net {
+@@ -680,6 +682,7 @@
  
  int bond_rcv_validate(const struct sk_buff *skb, struct bonding *bond, struct slave *slave);
  netdev_tx_t bond_dev_queue_xmit(struct bonding *bond, struct sk_buff *skb, struct net_device *slave_dev);
@@ -648,7 +650,7 @@
  int bond_create(struct net *net, const char *name);
  int bond_create_sysfs(struct bond_net *net);
  void bond_destroy_sysfs(struct bond_net *net);
-@@ -708,6 +711,13 @@ struct bond_vlan_tag *bond_verify_device
+@@ -713,6 +716,13 @@
  					      int level);
  int bond_update_slave_arr(struct bonding *bond, struct slave *skipslave);
  void bond_slave_arr_work_rearm(struct bonding *bond, unsigned long delay);
@@ -660,9 +662,9 @@
 +/* QCA NSS ECM bonding support - End */
 +
  void bond_work_init_all(struct bonding *bond);
+ void bond_work_cancel_all(struct bonding *bond);
  
- #ifdef CONFIG_PROC_FS
-@@ -812,4 +822,18 @@ static inline netdev_tx_t bond_tx_drop(s
+@@ -818,4 +828,18 @@
  	return NET_XMIT_DROP;
  }
  
