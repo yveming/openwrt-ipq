@@ -7,6 +7,12 @@
 # section is regenerated from a before/after diff taken at the exact chain
 # position. Afterwards all hunks anchor exactly.
 #
+# A patch is only considered clean when patch(1) exits 0 AND every declared
+# hunk was actually applied. patch(1) returns 0 while silently dropping a
+# malformed hunk (stray blank line before a hunk header / no trailing
+# newline), so those patches are now reported as "structural damage" for
+# manual repair instead of being mistaken for healthy.
+#
 # Usage: refresh-fuzz.py <workdir>
 #   <workdir> must contain the pristine trees (linux-<kver>/,
 #   backports-<bver>/) -- e.g. a check-patches.sh run directory.
@@ -54,6 +60,36 @@ def run(cmd, cwd=None, check=False):
     if check and r.returncode != 0:
         raise RuntimeError(cmd, r.stdout, r.stderr)
     return r
+
+def applied_hunks(out):
+    return len(re.findall(r'^Hunk #\d+ succeeded', out, re.M))
+
+def declared_hunks(patch):
+    return sum(1 for l in open(patch, encoding='utf-8', errors='replace')
+               if l.startswith('@@'))
+
+def structural_ok(out, patch):
+    """patch(1) exits 0 yet silently drops a hunk when the patch file is
+    malformed (stray blank line before a hunk header, missing trailing
+    newline). Treat 'exit 0' as clean ONLY if every declared hunk applied."""
+    return ('unexpectedly ends in middle of line' not in out
+            and applied_hunks(out) == declared_hunks(patch))
+
+def restore_tree(tree, snap):
+    for f, content in snap.items():
+        fp = os.path.join(tree, f)
+        if content is None:
+            if os.path.exists(fp):
+                os.remove(fp)
+        else:
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            open(fp, 'w', encoding='utf-8').write(content)
+
+def clean_rej(tree):
+    for root, _, files in os.walk(tree):
+        for f in files:
+            if f.endswith(('.rej', '.orig')):
+                os.remove(os.path.join(root, f))
 
 def files_in(patch):
     fs = []
@@ -106,7 +142,10 @@ def replace_file_section(patch, fname, newdiff):
         body.pop(0)
     newsec = ['--- a/%s' % fname, '+++ b/%s' % fname] + body
     lines[start:end] = newsec
-    open(patch, 'w', encoding='utf-8').write('\n'.join(lines))
+    data = '\n'.join(lines)
+    if not data.endswith('\n'):      # patch(1) drops the last hunk without a final EOL
+        data += '\n'
+    open(patch, 'w', encoding='utf-8').write(data)
     return True
 
 def process(tree, chain_dirs):
@@ -127,28 +166,25 @@ def process(tree, chain_dirs):
                 fp = os.path.join(tree, f)
                 snap[f] = open(fp, encoding='utf-8', errors='replace').read() \
                     if os.path.exists(fp) else None
-            # 先试零 fuzz
-            r = run(['patch', '-p1', '-d', tree, '--fuzz=0', '--no-backup-if-mismatch',
-                     '-i', patch])
-            if r.returncode == 0:
+            # 先试零 fuzz（--verbose 让 patch 打印每个 hunk，便于核对有没有被静默丢弃）
+            r = run(['patch', '-p1', '-d', tree, '--fuzz=0', '--verbose',
+                     '--no-backup-if-mismatch', '-i', patch])
+            if r.returncode == 0 and structural_ok(r.stdout, patch):
                 continue
             # 还原快照(dry-run 失败可能有部分写入?patch 原子性较好,但保险起见)
-            for f, content in snap.items():
-                fp = os.path.join(tree, f)
-                if content is None:
-                    if os.path.exists(fp):
-                        os.remove(fp)
-                else:
-                    os.makedirs(os.path.dirname(fp), exist_ok=True)
-                    open(fp, 'w', encoding='utf-8').write(content)
+            restore_tree(tree, snap)
             # 清理失败遗留的 .rej
-            for root, _, fs2 in os.walk(tree):
-                for f2 in fs2:
-                    if f2.endswith(('.rej', '.orig')):
-                        os.remove(os.path.join(root, f2))
+            clean_rej(tree)
+            if r.returncode == 0:
+                # 退出码 0 但有 hunk 被静默丢弃:目录状态不完整,不能自动重生成
+                print('  !! 结构性损坏(退出码 0 但有 hunk 被静默丢弃,需手工修):', rel)
+                print('     ', (r.stdout or '')[-500:].replace('\n', '\n      '))
+                dirty.append(patch)
+                continue
             # 带 fuzz 应用
-            r2 = run(['patch', '-p1', '-d', tree, '--no-backup-if-mismatch', '-i', patch])
-            if r2.returncode != 0:
+            r2 = run(['patch', '-p1', '-d', tree, '--verbose',
+                      '--no-backup-if-mismatch', '-i', patch])
+            if r2.returncode != 0 or not structural_ok(r2.stdout, patch):
                 print('  !! 真实失败(需手工处理):', rel)
                 print(r2.stdout[-800:], r2.stderr[-400:])
                 dirty.append(patch)

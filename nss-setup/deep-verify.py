@@ -105,8 +105,11 @@ def parse_hunks(section_text):
     hunks, idx, cur = {}, 0, None
     for line in section_text.splitlines():
         if line.startswith("@@"):
-            m = re.match(r"@@ -(\d+),\d+ \+(\d+),\d+ @@(?: (.*))?$", line)
             idx += 1
+            m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(?: (.*))?$", line)
+            if not m:
+                cur = None
+                continue
             cur = dict(seq=[], os=int(m.group(1)), ns=int(m.group(2)),
                        suffix=(m.group(3) or "").strip())
             hunks[idx] = cur
@@ -189,9 +192,31 @@ def main():
     targets = {p: patch_targets(p) for p in order}
     pre = Prestate(args, order, targets)
 
+    # Defense in depth: every declared hunk must appear as "Hunk #N succeeded".
+    # patch(1) exits 0 while silently dropping a malformed hunk, which then
+    # never shows up as an offset/fuzz event, so catch it here too.
+    evset = {(ev["patch"], ev["file"], ev["hunk"]) for ev in events}
+    missing = []
+    for p in order:
+        for f in sorted(targets.get(p, ())):
+            try:
+                sec = extract_section(p, f)
+            except OSError:
+                continue
+            for idx in parse_hunks(sec):
+                if (p, f, idx) not in evset:
+                    missing.append((p, f, idx))
+    if missing:
+        print(f"deep: {len(missing)} declared hunk(s) with no successful apply line "
+              "(silently dropped or FAILED):")
+        for p, f, idx in missing:
+            print(f"CHECK {os.path.basename(p)}#{idx} {f}")
+
     suspicious = [ev for ev in events
                   if ev["fuzz"] > 0 or abs(ev["offset"]) > args.max_offset]
     if not suspicious:
+        if missing:
+            return 1
         print("deep: nothing to verify (no fuzz, no offsets beyond "
               f"{args.max_offset} lines)")
         return 0
@@ -259,8 +284,9 @@ def main():
                   f"positions: {hits[:8]}{' ...' if len(hits) > 8 else ''}")
 
     print(f"deep: {len(suspicious) - nbad}/{len(suspicious)} hunks uniquely "
-          f"anchored, {nbad} need review")
-    return 0 if nbad == 0 else 1
+          f"anchored, {nbad} need review"
+          + (f", {len(missing)} declared hunk(s) dropped/failed" if missing else ""))
+    return 0 if (nbad == 0 and not missing) else 1
 
 
 if __name__ == "__main__":
