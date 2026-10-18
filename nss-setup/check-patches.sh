@@ -24,6 +24,12 @@
 # hunk must match it at exactly one position. Needs roughly one extra
 # copy of each source tree on disk (removed with the workdir).
 #
+# Every run also lints the patch files (no stray blank line before a hunk
+# header, trailing newline present) and accounts declared @@ hunks against
+# the hunks patch(1) reports as applied. patch(1) exits 0 AND writes no
+# reject when it silently drops a hunk (that is how a broken 0981-1 patch
+# reached a build), so these two checks are what actually catch it.
+#
 # Exit codes: 0 = clean; 1 = chain failure (or fuzz found with --strict);
 #             2 = fuzz found (warnings only by default).
 #
@@ -65,7 +71,59 @@ FAILED_CHAINS=0
 FUZZY_CHAINS=0
 
 log() { printf '[check-patches] %s\n' "$*"; }
-export PATCH="patch ${PATCH_OPTS:-}" # pass extra patch(1) opts through patch-kernel.sh
+# --verbose makes patch(1) print "Hunk #N succeeded" for EVERY hunk (even
+# offset-0 ones), which account_hunks() relies on to detect silently dropped
+# hunks. PATCH_OPTS is still appended so callers can add --fuzz=0 etc.
+export PATCH="patch --verbose ${PATCH_OPTS:-}"
+
+# ---------------------------------------------------- patch hygiene helpers
+# A hunk that patch(1) silently drops (e.g. a stray blank line before "@@",
+# or a missing trailing newline at EOF) produces NO log line and exit code 0,
+# so the old checks (exit code / " fuzz " / .rej) missed it entirely. These
+# helpers close that gap.
+
+lint_patches() { # lint_patches <patch-dir>... : structural sanity of *.patch
+	local d f bad=0 nf=0
+	for d in "$@"; do
+		[ -d "$d" ] || continue
+		while IFS= read -r f; do
+			nf=$((nf+1))
+			if [ -n "$(tail -c 1 "$f" 2>/dev/null)" ]; then
+				log "  LINT $(basename "$f"): no trailing newline (patch(1) may drop the last hunk)"
+				bad=1
+			fi
+			if awk 'prev=="" && /^@@/{found=1} {prev=$0} END{exit !found}' "$f"; then
+				log "  LINT $(basename "$f"): blank line before a hunk header (@@) -> the hunk is silently dropped"
+				bad=1
+			fi
+		done < <(find "$d" -maxdepth 1 -type f -name '*.patch' 2>/dev/null | sort)
+	done
+	[ "$nf" -gt 0 ] && log "  lint: $nf patch file(s) checked, issues=$bad"
+	return $bad
+}
+
+account_hunks() { # account_hunks <log> -> "patch: declared=X applied=Y" on mismatch
+	awk '
+	function declared(f,   n, ln) {
+		n = 0
+		while ((getline ln < f) > 0) if (ln ~ /^@@/) n++
+		close(f)
+		return n
+	}
+	function check(   d) {
+		if (p == "") return
+		d = declared(p)
+		# d==0 means the patch could not be read as plain text (e.g. gz) -- skip
+		if (d > 0 && d != appl) {
+			printf "%s: declared=%d applied=%d\n", p, d, appl
+			bad = 1
+		}
+	}
+	/^Applying / { check(); p = $2; sub(/ using.*/, "", p); appl = 0; next }
+	/^Hunk #[0-9]+ succeeded/ { appl++ }
+	END { check(); if (bad) exit 1 }
+	' "$1"
+}
 
 keep_pristine() { # keep_pristine <archive> <tree-name> -- pristine copy for --deep
 	[ $DEEP -eq 1 ] || return 0
@@ -118,6 +176,11 @@ apply_chain() { # apply_chain <src-tree> <patch-dir> <log-name>
 	local n
 	n=$(find "$pdir" -maxdepth 1 -type f | wc -l)
 	[ "$n" -eq 0 ] && return 0
+	if ! lint_patches "$pdir"; then
+		FAIL_BAD=1
+		log "  FAILED: structural lint failed in $(basename "$pdir")"
+		return 1
+	fi
 	log "  applying $(basename "$pdir") ($n patches)"
 	if ! "$SCRIPTDIR/patch-kernel.sh" "$tree" "$pdir" >"$WORK/$lname" 2>&1; then
 		log "  FAILED: see $WORK/$lname (tail below)"
@@ -128,16 +191,35 @@ apply_chain() { # apply_chain <src-tree> <patch-dir> <log-name>
 	return 0
 }
 
-scan_log() { # scan_log <log> <chain-label> ; sets FAIL_FUZZ=1 if fuzz found
+scan_log() { # scan_log <log> <chain-label> ; sets FAIL_BAD / FAIL_FUZZ
 	local llog=$1 label=$2
-	local fuzz off rej=0
+	local fuzz off warn acct
 	fuzz=$(grep -c ' fuzz ' "$llog" || true)
 	off=$(grep -c '(offset ' "$llog" || true)
+
+	# (a) signs of a malformed patch that patch(1) may still exit 0 on
+	warn=$(grep -icE 'unexpectedly ends in middle of line|trailing garbage|Hunk #[0-9]+ FAILED|out of [0-9]+ hunk|can.t find file to patch|Skipping patch' "$llog" || true)
+	if [ "$warn" -gt 0 ]; then
+		FAIL_BAD=1
+		log "  $label: MALFORMED PATCH OUTPUT:"
+		grep -inE 'unexpectedly ends in middle of line|trailing garbage|Hunk #[0-9]+ FAILED|out of [0-9]+ hunk|can.t find file to patch|Skipping patch' "$llog" | sed 's/^/    /'
+	fi
+
+	# (b) reject files
 	if find "$CHAIN_TREE" -name '*.rej' | grep -q .; then
-		rej=1
+		FAIL_BAD=1
 		log "  $label: REJECT FILES: "
 		find "$CHAIN_TREE" -name '*.rej' | sed 's/^/    /'
 	fi
+
+	# (c) hunk accounting: declared @@ vs "Hunk #N succeeded" in the log
+	acct=$(account_hunks "$llog") || true
+	if [ -n "$acct" ]; then
+		FAIL_BAD=1
+		log "  $label: HUNK COUNT MISMATCH (silently dropped hunk):"
+		printf '%s\n' "$acct" | sed 's/^/    /'
+	fi
+
 	log "  $label: fuzz=$fuzz offset=$off"
 	if [ "$fuzz" -gt 0 ]; then
 		FAIL_FUZZ=1
@@ -229,6 +311,7 @@ log "workdir: $WORK"
 overall=0
 for chain in $ONLY; do
 	FAIL_FUZZ=0
+	FAIL_BAD=0
 	log "== chain: $chain"
 	case $chain in
 	kernel) check_kernel; crc=$? ;;
@@ -236,7 +319,7 @@ for chain in $ONLY; do
 	pkgs) check_pkgs; crc=$? ;;
 	*) log "unknown chain: $chain"; crc=1 ;;
 	esac
-	if [ $crc -ne 0 ]; then
+	if [ $crc -ne 0 ] || [ $FAIL_BAD -ne 0 ]; then
 		FAILED_CHAINS=$((FAILED_CHAINS+1)); overall=1
 		log "== chain: $chain -> FAILED"
 	elif [ $FAIL_FUZZ -ne 0 ]; then
