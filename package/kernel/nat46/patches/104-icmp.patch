@@ -109,12 +109,11 @@ Signed-off-by: Pavithra R <pavir@codeaurora.org>
    /*
     * Set the Type to 4, and adjust the
     * ICMP checksum both to take the type/code change into account
-@@ -1368,27 +1376,33 @@ static uint16_t nat46_fixup_icmp_paramet
-    */
+@@ -1369,20 +1369,24 @@
    static int ptr4_6[] = { 0, 1, 4, 4, -1, -1, -1, -1, 7, 6, -1, -1, 8, 8, 8, 8, 24, 24, 24, 24, -1 };
    u8 *icmp_pptr = icmp_parameter_ptr(icmph);
+   u32 *icmp6_pptr = icmp6_parameter_ptr((struct icmp6hdr *)icmph);
 -  int new_pptr = -1;
-+  u32 *icmp6_pptr = icmp6_parameter_ptr((struct icmp6hdr *)icmph);
 +  int8_t new_pptr = -1;
 +
 +  icmph->type = 4;
@@ -126,9 +125,8 @@ Signed-off-by: Pavithra R <pavir@codeaurora.org>
          icmph->code = 0;
          new_pptr = ptr4_6[*icmp_pptr];
 -        if(new_pptr >= 0) {
--          /* FIXME: update the parameter pointer in ICMPv6 with new_pptr value */
 +        if (new_pptr >= 0) {
-+          *icmp6_pptr = new_pptr;
+           *icmp6_pptr = htonl(new_pptr);
 +          return xlate_pkt_in_err_v4_to_v6(nat46, iph, old_skb, sport, dport);
          }
 -      } else {
@@ -141,17 +139,14 @@ Signed-off-by: Pavithra R <pavir@codeaurora.org>
      default:
        iph->protocol = NEXTHDR_NONE;
    }
-   return 0;
- }
- 
+@@ -1392,3 +1392,4 @@ static uint16_t nat46_fixup_icmp_parameterprob(nat46_instance_t *nat46, struct iphdr *iph, struct icmphdr *icmph, struct sk_buff *old_skb) {
 -static uint16_t nat46_fixup_icmp_dest_unreach(nat46_instance_t *nat46, struct iphdr *iph, struct icmphdr *icmph, struct sk_buff *old_skb) {
 +static uint16_t nat46_fixup_icmp_dest_unreach(nat46_instance_t *nat46, struct iphdr *iph,
 +			struct icmphdr *icmph, struct sk_buff *old_skb, uint16_t *sport, uint16_t *dport) {
    /*
     *    Translate the Code as
-    *    described below, set the Type to 1, and adjust the ICMP
-@@ -1451,16 +1465,21 @@ static uint16_t nat46_fixup_icmp_dest_un
- 
+@@ -1453,12 +1457,15 @@
+   u32 *pptr6 = icmp6_parameter_ptr((struct icmp6hdr *)icmph);
    u16 *pmtu = ((u16 *)icmph) + 3; /* IPv4-compatible MTU value is 16 bit */
  
 +  icmph->type = 1;
@@ -161,19 +156,11 @@ Signed-off-by: Pavithra R <pavir@codeaurora.org>
      case 1:
        icmph->code = 0;
        break;
--    case 2:
--      /* FIXME: set ICMPv6 parameter pointer to 6 */
-+    case 2: {
-+      u32 *icmp6_pptr = icmp6_parameter_ptr((struct icmp6hdr *)icmph);
-+      *icmp6_pptr = 6; /* Offset to Next Proto field in IPv6 header. */
+     case 2:
++      nat46debug(3, "ICMP Proto Unreachable translated into IPv6 Param Prob.\n");
        icmph->type = 4;
        icmph->code = 1;
-+      nat46debug(3, "ICMP Proto Unreachable translated into IPv6 Param Prob.\n");
-       break;
-+    }
-     case 3:
-       icmph->code = 4;
-       break;
+       *pptr6 = htonl(6);
 @@ -1510,13 +1529,15 @@ static uint16_t nat46_fixup_icmp_dest_un
        break;
      default:
