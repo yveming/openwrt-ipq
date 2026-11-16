@@ -11,11 +11,11 @@
 #             target/linux/<target>/patches-<ver>
 #   mac80211  package/kernel/mac80211/patches/{build,subsys,ath,...} then
 #             patches/nss/<driver> (from NSS_PATCH in the Makefile)
-#   pkgs      patches/ of each package (default: qca-nss-dp qca-ssdk)
+#   pkgs      patches/ of each package (default: qca-nss-dp qca-ssdk nat46)
 #
 # Usage:
 #   check-patches.sh [--target qualcommax] [--only kernel,mac80211,pkgs]
-#                    [--pkgs "qca-nss-dp qca-ssdk"] [--deep]
+#                    [--pkgs "qca-nss-dp qca-ssdk nat46"] [--deep]
 #                    [--max-offset 25] [--keep] [--strict] [-h]
 #
 # --deep additionally verifies that every hunk which applied with fuzz or
@@ -41,7 +41,7 @@ set -u -o pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 TARGET=qualcommax
 ONLY="kernel mac80211 pkgs"
-PKGS="qca-nss-dp qca-ssdk"
+PKGS="qca-nss-dp qca-ssdk nat46"
 KEEP=0
 STRICT=0
 DEEP=0
@@ -172,10 +172,16 @@ resolve_source() { # resolve_source <name> <glob hint...> -> echoes archive path
 
 apply_chain() { # apply_chain <src-tree> <patch-dir> <log-name>
 	local tree=$1 pdir=$2 lname=$3
-	[ -d "$pdir" ] || return 0
+	if [ ! -d "$pdir" ]; then
+		: > "$WORK/$lname"
+		return 0
+	fi
 	local n
 	n=$(find "$pdir" -maxdepth 1 -type f | wc -l)
-	[ "$n" -eq 0 ] && return 0
+	if [ "$n" -eq 0 ]; then
+		: > "$WORK/$lname"
+		return 0
+	fi
 	if ! lint_patches "$pdir"; then
 		FAIL_BAD=1
 		log "  FAILED: structural lint failed in $(basename "$pdir")"
@@ -332,6 +338,13 @@ done
 
 log "summary: failed_chains=$FAILED_CHAINS fuzzy_chains=$FUZZY_CHAINS"
 if [ $overall -eq 0 ] && [ $FUZZY_CHAINS -gt 0 ] && [ $STRICT -eq 1 ]; then overall=2; fi
+
+if [ $DEEP -eq 1 ] && [ $overall -eq 0 ] && [ ! -s "$WORK/chain-order.txt" ]; then
+	log "== deep verification: skipped (no patches were applied)"
+	rm -rf "$WORK"
+	log "clean (workdir removed; use --keep to inspect logs)"
+	exit 0
+fi
 
 if [ $DEEP -eq 1 ] && [ $overall -eq 0 ]; then
 	log "== deep verification (fuzz/large-offset hunks at application time)"
